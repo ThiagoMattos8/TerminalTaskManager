@@ -1,13 +1,10 @@
-# Creates multiple single threaded processess that run in parallel 
-# While the processes run, it'll get CPU% and Memory% every 0.2 seconds.
-
+# Creates multiple single threaded processess that run in parallel.
 import multiprocessing as mp
-import time
 import psutil
+import time
 
-#  This will run inside each child process. It performs simple CPU-heavy math.
+# This will run inside each child process. It performs simple CPU-heavy math.
 def worker(work_units, operation):
-    
     x = 1
 
     if operation == "add":
@@ -32,41 +29,31 @@ def worker(work_units, operation):
         raise ValueError("Unknown operation: " + str(operation))
 
 
-def run_cpu_benchmark():
-    num_procs = 8
-    work_units = 20_000_000  # How many times the operation will run, change if its too fast or too slow
-    operations = ["add", "sub", "mul", "div", "mul", "mul", "mul", "mul"]
-
+def spawn_workers():
+    num_procs = 4
+    work_units = 80_000_000  
+    operations = ["add", "sub", "mul", "div"]
     processes = []
 
-    # Prime CPU reading
-    psutil.cpu_percent(interval=None)
-
+    # Start the clock to measure how fast the OS can create the processes
     start_time = time.perf_counter()
 
-    # Start processes
     for i in range(num_procs):
         p = mp.Process(
             target=worker,
-            args=(work_units, operations[i])
+            args=(work_units, operations[i]),
+            name=f"Worker-{operations[i]}"
         )
         p.start()
         processes.append(p)
+        
+        # Prime the CPU reading
+        try:
+            psutil.Process(p.pid).cpu_percent(interval=None)
+        except psutil.NoSuchProcess:
+            pass
 
-    # While processes run, keep sampling CPU and memory
-    last_cpu = 0.0
-    last_mem = 0.0
+    # Stop the boot clock right after the last process starts
+    boot_time = time.perf_counter() - start_time
 
-    for p in processes:
-        while p.is_alive():
-            last_cpu = psutil.cpu_percent(interval=None)
-            last_mem = psutil.virtual_memory().percent
-            time.sleep(0.2)
-
-    # Wait for all to finish
-    for p in processes:
-        p.join()
-
-    elapsed = time.perf_counter() - start_time
-
-    return elapsed, last_cpu, last_mem
+    return processes, start_time, boot_time
