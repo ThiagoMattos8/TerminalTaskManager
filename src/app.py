@@ -15,7 +15,7 @@ def fmt_bytes(n: int) -> str:
 def run_terminal_monitor():
     print("Starting OS Benchmark...")
     
-    # Unpack the processes and our new timers
+    # Unpack the processes and our new timers so it only tracks each process
     processes, start_time, boot_time = spawn_workers()
 
     all_done = False
@@ -29,8 +29,8 @@ def run_terminal_monitor():
         used, total, pct = get_memory()
 
         print("=== System Baseline ===")
-        print(f"System CPU:    {sys_cpu:10.1f} %")
-        print(f"System Memory: {fmt_bytes(used)} / {fmt_bytes(total)}  ({pct:10.1f}%)")
+        print(f"System CPU:    {sys_cpu:5.1f} %")
+        print(f"System Memory: {fmt_bytes(used)} / {fmt_bytes(total)}  ({pct:5.1f}%)")
         print(f"Process Boot Time: {boot_time:.4f} seconds\n")
         
         print("=== Active Workers ===")
@@ -41,12 +41,12 @@ def run_terminal_monitor():
                 # If even one process is alive, we keep the main loop going
                 all_done = False
                 p_cpu, p_mem = get_process_metrics(p.pid)
-                print(f"[{p.pid}] {p.name:<12} - CPU: {p_cpu:10.1f}% | Mem: {p_mem:10.1f}%")
+                print(f"[{p.pid}] {p.name:<12} - CPU: {p_cpu:5.1f}% | Mem: {p_mem:5.1f}%")
             else:
                 print(f"[{p.pid}] {p.name:<12} - FINISHED")
 
-        # Wait 0.1 seconds before drawing the next frame
-        time.sleep(0.1)
+        # Wait 0.15 seconds before drawing the next frame
+        time.sleep(0.15)
 
     # Calculate total execution time once the loop breaks
     total_time = time.perf_counter() - start_time

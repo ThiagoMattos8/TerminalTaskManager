@@ -1,6 +1,6 @@
 import psutil
 
-# Cache to store process objects so their internal timers don't reset
+# Cache to store process objects so their internal timers don't reset themselves
 _process_cache = {}
 
 # Returns the overall CPU usage for the whole system

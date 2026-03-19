@@ -1,4 +1,4 @@
-# Creates multiple single threaded processess that run in parallel.
+# Creates multiple single threaded processess that run in parallel. Need to add Sequential as well
 import multiprocessing as mp
 import psutil
 import time
