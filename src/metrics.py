@@ -1,36 +1,71 @@
 import psutil
 
-# Cache to store process objects so their internal timers don't reset themselves
-_process_cache = {}
 
-# Returns the overall CPU usage for the whole system
 def get_cpu_percent() -> float:
     return psutil.cpu_percent(interval=None)
 
-# Returns memory usage percentage for the whole system
+
+def get_cpu_per_core() -> list[float]:
+    return psutil.cpu_percent(percpu=True, interval=None)
+
+
 def get_memory() -> tuple[int, int, float]:
     vm = psutil.virtual_memory()
     return vm.used, vm.total, vm.percent
 
-# Returns CPU and Memory percentage for a specific process ID (PID)
-def get_process_metrics(pid: int) -> tuple[float, float]:
-    try:
-        # If we haven't tracked this PID yet, create and prime the object
-        if pid not in _process_cache:
-            proc = psutil.Process(pid)
-            proc.cpu_percent(interval=None)  # Prime the CPU tracker
-            _process_cache[pid] = proc
-        
-        # Fetch the cached object
-        proc = _process_cache[pid]
-        
-        # Now interval=None will properly compare against the last call!
-        cpu = proc.cpu_percent(interval=None)
-        mem = proc.memory_percent()
-        return cpu, mem
-        
-    except psutil.NoSuchProcess:
-        # If the process finished and closed before we check, clean the cache and return 0
-        if pid in _process_cache:
-            del _process_cache[pid]  
-        return 0.0, 0.0
+
+def format_bytes(value: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    current = float(value)
+    for unit in units:
+        if current < 1024 or unit == units[-1]:
+            return f"{current:.1f} {unit}"
+        current /= 1024
+    return f"{current:.1f} TB"
+
+
+def get_system_info() -> dict:
+    """Collect static system information — call once at startup."""
+    import platform
+    import subprocess as _sp
+
+    sys_name = platform.system()
+
+    # OS name + version
+    if sys_name == "Darwin":
+        ver = platform.mac_ver()[0]
+        os_str = f"macOS {ver}" if ver else "macOS"
+    elif sys_name == "Linux":
+        try:
+            pretty = platform.freedesktop_os_release().get("PRETTY_NAME", "")
+        except AttributeError:
+            pretty = ""
+        os_str = pretty or f"Linux {platform.release()[:20]}"
+    else:
+        os_str = f"{sys_name} {platform.release()}"
+
+    # CPU model name — try sysctl on macOS, fall back to platform
+    cpu_str = platform.processor() or platform.machine()
+    if sys_name == "Darwin":
+        try:
+            out = _sp.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                stderr=_sp.DEVNULL, timeout=1,
+            ).decode().strip()
+            if out:
+                cpu_str = out
+        except Exception:
+            pass
+
+    # Core counts
+    phys = psutil.cpu_count(logical=False) or 0
+    logi = psutil.cpu_count(logical=True) or 0
+    cores_str = f"{logi} cores" if phys == logi else f"{phys}p/{logi}t cores"
+
+    return {
+        "os": os_str,
+        "cpu": cpu_str[:40],
+        "cores_str": cores_str,
+        "logical_cores": logi,
+        "ram_gb": round(psutil.virtual_memory().total / (1024 ** 3), 1),
+    }

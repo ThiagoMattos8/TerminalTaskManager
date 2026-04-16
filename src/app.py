@@ -1,56 +1,180 @@
-import time
-import os
-from metrics import get_cpu_percent, get_memory, get_process_metrics
-from proccess_creation import spawn_workers
+from __future__ import annotations
 
-def fmt_bytes(n: int) -> str:
-    units = ["B", "KB", "MB", "GB", "TB"]
-    x = float(n)
-    for u in units:
-        if x < 1024 or u == units[-1]:
-            return f"{x:.1f} {u}"
-        x /= 1024
-    return f"{x:.1f} TB"
+import psutil
+from textual.app import App, ComposeResult
+from textual.containers import Vertical
+from textual.widgets import Footer, Header, Static
 
-def run_terminal_monitor():
-    print("Starting OS Benchmark...")
-    
-    # Unpack the processes and our new timers so it only tracks each process
-    processes, start_time, boot_time = spawn_workers()
+from metrics import (
+    get_cpu_percent,
+    get_cpu_per_core,
+    get_memory,
+    get_system_info,
+)
+from stress_runner import StressRunner
 
-    all_done = False
-    
-    # Keep looping and refreshing the screen until all workers finish
-    while not all_done:
-        # Clears the terminal screen
-        os.system('cls' if os.name == 'nt' else 'clear')
 
-        sys_cpu = get_cpu_percent()
-        used, total, pct = get_memory()
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
-        print("=== System Baseline ===")
-        print(f"System CPU:    {sys_cpu:5.1f} %")
-        print(f"System Memory: {fmt_bytes(used)} / {fmt_bytes(total)}  ({pct:5.1f}%)")
-        print(f"Process Boot Time: {boot_time:.4f} seconds\n")
-        
-        print("=== Active Workers ===")
-        
-        all_done = True
-        for p in processes:
-            if p.is_alive():
-                # If even one process is alive, we keep the main loop going
-                all_done = False
-                p_cpu, p_mem = get_process_metrics(p.pid)
-                print(f"[{p.pid}] {p.name:<12} - CPU: {p_cpu:5.1f}% | Mem: {p_mem:5.1f}%")
-            else:
-                print(f"[{p.pid}] {p.name:<12} - FINISHED")
+def render_bar(percent: float, width: int = 28) -> str:
+    filled = min(width, max(0, round((percent / 100) * width)))
+    return f"[green]{'▓' * filled}[/green]{'░' * (width - filled)} {percent:5.1f}%"
 
-        # Wait 0.15 seconds before drawing the next frame
-        time.sleep(0.15)
 
-    # Calculate total execution time once the loop breaks
-    total_time = time.perf_counter() - start_time
-    print(f"\nBenchmark Complete! Total execution time: {total_time:.4f} seconds.")
+def _make_bar(percent: float, width: int = 18) -> str:
+    filled = min(width, max(0, round((percent / 100) * width)))
+    return "▓" * filled + "░" * (width - filled)
+
+
+def _core_bar(percent: float, width: int = 6) -> str:
+    filled = min(width, max(0, round((percent / 100) * width)))
+    return f"[green]{'▓' * filled}[/green]{'░' * (width - filled)}"
+
+
+# ── System panel (always visible at the top) ──────────────────────────────────
+
+class SystemPanel(Static):
+    def render_metrics(
+        self,
+        cpu: float,
+        mem_pct: float,
+        per_core: list[float],
+        sys_info: dict,
+    ) -> None:
+        info = (
+            f"{sys_info['os']}  ·  {sys_info['cpu']}  ·  "
+            f"{sys_info['cores_str']}  ·  {sys_info['ram_gb']} GB RAM"
+        )
+        lines = [
+            f"System Monitor  │  {info}",
+            f"CPU:    {render_bar(cpu)}",
+            f"Memory: {render_bar(mem_pct)}",
+            "",
+        ]
+
+        # Per-core bars — 4 per row, bar width 6
+        n = len(per_core)
+        for row_start in range(0, n, 4):
+            parts = [
+                f"C{i + 1:<2} {_core_bar(per_core[i])} {per_core[i]:3.0f}%"
+                for i in range(row_start, min(row_start + 4, n))
+            ]
+            prefix = "Cores:  " if row_start == 0 else "        "
+            lines.append(prefix + "  ".join(parts))
+
+        self.update("\n".join(lines))
+
+
+# ── Stress Test panel ─────────────────────────────────────────────────────────
+
+class StressPanel(Static):
+    def render_snapshot(self, snap: dict) -> None:
+        status = snap["status"]
+        cfg = snap["config"]
+
+        lines = [
+            f"Status: {status}   Elapsed: {snap['elapsed']:.2f}s",
+        ]
+
+        if status != "Idle":
+            lines += [
+                "",
+                f"CPU    peak {snap['peak_cpu']:.1f}%   avg {snap['avg_cpu']:.1f}%"
+                f"   ·   Memory   baseline {snap['baseline_mem_pct']:.1f}%   delta {snap['mem_delta']:+.1f}%",
+            ]
+
+        lines += [
+            "",
+            f"{'Process':<14} {'Progress':<25} State",
+            "─" * 48,
+        ]
+
+        for w in snap["workers"]:
+            bar = _make_bar(w["progress_pct"])
+            state = "[cyan]Done[/cyan]   " if w["done"] else "[green]Working[/green]"
+            lines.append(
+                f"{w['name']:<14} {bar} {w['progress_pct']:>5.1f}%  {state}"
+            )
+
+        if status == "Complete":
+            total_iters = snap["total_iterations"]
+            ops_sec = snap["ops_per_sec"]
+            n_workers = cfg["workers"]
+            per_proc = ops_sec / n_workers if n_workers > 0 else 0.0
+            lines.extend([
+                "",
+                f"[green]Done in {snap['elapsed']:.2f}s"
+                f"   ·   {total_iters} matrix ops"
+                f"   ·   {per_proc:.2f} ops/s per process[/green]",
+            ])
+
+        self.update("\n".join(lines))
+
+
+# ── Main application ──────────────────────────────────────────────────────────
+
+class OSBenchmarkApp(App):
+    CSS = """
+    Screen {
+        layout: vertical;
+        padding: 1;
+    }
+
+    #system-panel {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    .panel {
+        border: round green;
+        padding: 0 1;
+        height: 1fr;
+    }
+
+    #stress-panel {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        ("s", "start",  "Start"),
+        ("r", "rerun",  "Rerun"),
+        ("q", "quit",   "Quit"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stress_runner = StressRunner()
+        self._sysinfo = get_system_info()
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Vertical():
+            yield SystemPanel(classes="panel", id="system-panel")
+            yield StressPanel(classes="panel", id="stress-panel")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        psutil.cpu_percent(interval=None)
+        psutil.cpu_percent(percpu=True, interval=None)
+        self.set_interval(0.25, self.refresh_dashboard)
+
+    def action_start(self) -> None:
+        self.stress_runner.start()
+
+    def action_rerun(self) -> None:
+        self.stress_runner.rerun()
+
+    def refresh_dashboard(self) -> None:
+        cpu = get_cpu_percent()
+        per_core = get_cpu_per_core()
+        _, _, mem_pct = get_memory()
+
+        self.query_one(SystemPanel).render_metrics(cpu, mem_pct, per_core, self._sysinfo)
+
+        stress_snap = self.stress_runner.poll(cpu, mem_pct)
+        self.query_one(StressPanel).render_snapshot(stress_snap)
+
 
 if __name__ == "__main__":
-    run_terminal_monitor()
+    OSBenchmarkApp().run()
